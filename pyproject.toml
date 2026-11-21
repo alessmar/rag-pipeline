@@ -1,0 +1,51 @@
+[project]
+name = "rag"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "alessmar" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "arize-phoenix>=21.0.0",
+    "arize-phoenix-otel>=0.17.3",
+    "celery[redis]>=5.7.0",
+    "docling>=2.150.1",
+    "httpcore>=1.0.9",
+    "lancedb>=0.41.0",
+    "lingua-language-detector>=2.1.1",
+    "openai>=3.55.0",
+    "openinference-instrumentation-openai>=0.1.74",
+    "openinference-semantic-conventions>=0.1.46",
+    "opentelemetry-api>=1.45.2",
+    "pydantic>=2.14.3",
+    "pymupdf>=2.1",
+    "python-dotenv>=1.2.4",
+    "sentence-transformers>=6.3.0",
+    "streamlit>=1.67.0",
+    "torch>=2.15.0",
+    "torchvision",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.6,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "reportlab>=5.1.0",
+]
+
+[project.scripts]
+rag = "rag.cli:main"
+
+# CPU-only PyTorch on Linux: the default wheels pull gigabytes of CUDA libraries the app never uses
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
