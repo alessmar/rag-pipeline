@@ -12,6 +12,11 @@ I wanted to build a RAG pipeline that is performant and reusable, and to learn t
 
 I built it with the help of Claude Code, but I directed the architecture and chose the libraries myself, such as Docling for parsing and Celery for the ingestion queue.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="diagrams/rag-stack-dark.png">
+  <img alt="Stack diagram: the Streamlit app and the Celery worker each embed with a local model; the worker parses PDFs with Docling into LanceDB, Redis carries the queue, OpenAI answers, Phoenix collects traces" src="diagrams/rag-stack.png">
+</picture>
+
 ## Quick start (Docker)
 
 You need [Docker](https://docs.docker.com/get-docker/) with Compose, an [OpenAI API key](https://platform.openai.com/api-keys) and about 8 GB of free RAM.
