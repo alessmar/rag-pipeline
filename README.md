@@ -18,7 +18,7 @@ I built it with the help of Claude Code, but I directed the architecture and cho
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/rag-stack-dark.png">
-  <img alt="Stack diagram: the Streamlit app and the Celery worker each embed with a local model; the worker parses PDFs with Docling into LanceDB, Redis carries the queue, OpenAI answers, Phoenix collects traces" src="diagrams/rag-stack.png">
+  <img alt="Stack diagram: the Streamlit app and the Celery worker each embed with a local model; the worker parses PDFs with Docling into LanceDB, Redis carries the queue, SQLite keeps jobs and chat history, OpenAI rewrites follow-ups and answers, Phoenix collects traces" src="diagrams/rag-stack.png">
 </picture>
 
 ## Quick start (Docker)
@@ -26,7 +26,7 @@ I built it with the help of Claude Code, but I directed the architecture and cho
 You need [Docker](https://docs.docker.com/get-docker/) with Compose, an [OpenAI API key](https://platform.openai.com/api-keys) and about 8 GB of free RAM.
 
 ```
-git clone <this repository>
+git clone https://github.com/alessmar/rag-pipeline.git
 cd rag-pipeline
 cp .env.example .env
 ```
@@ -48,7 +48,24 @@ The first start builds the image (about 5 GB of disk) and the first PDF download
 docker compose exec app sh -c 'python scripts/produce.py --tenant "$RAG_DEFAULT_TENANT" https://example.com/yourfile.pdf'
 ```
 
-The job shows up in the sidebar, and the worker downloads and ingests it. To use a server on your own network, see `RAG_FETCH_ALLOW` below.
+The job shows up in the sidebar, and the worker downloads and ingests it.
+
+**A PDF on your disk.** The worker only downloads from the network, so serve the folder from your machine and let the worker reach it. From the project folder:
+
+```
+GATEWAY=$(docker network inspect rag-pipeline_default --format '{{(index .IPAM.Config 0).Gateway}}')
+echo "RAG_FETCH_ALLOW=$GATEWAY" >> .env
+docker compose up -d worker
+python3 -m http.server 8000 --bind $GATEWAY --directory path/to/pdfs
+```
+
+Leave the server running, and in a second terminal queue the file:
+
+```
+docker compose exec app sh -c "python scripts/produce.py --tenant \"\$RAG_DEFAULT_TENANT\" http://$GATEWAY:8000/yourfile.pdf"
+```
+
+`$GATEWAY` is the address of your machine on the Compose network. Use it in the URL, not `127.0.0.1`: inside a container, `127.0.0.1` is the container itself. Stop the server when the job is done. `RAG_FETCH_ALLOW` is explained in "What the worker accepts" below.
 
 It takes about a minute per 30 pages. Reload the app and ask a question about it.
 
@@ -221,6 +238,31 @@ A job that can never succeed (a blocked address, a 4xx answer, not a PDF, no ext
 - Redis is the trust boundary. Anyone who can write to it can queue a job for any tenant, because the tenant is part of the message. Keep Redis on a private network or `127.0.0.1`, set a password, and give a producer an ACL user that may only add to the queue.
 - Turn on persistence (`appendonly yes`), or a Redis restart empties the queue. Set `maxmemory-policy noeviction` so Redis never drops queued jobs to free memory.
 - A job that is not acknowledged within `RAG_VISIBILITY_SECONDS` (one hour by default) is handed out again, so keep it above your slowest PDF. Reprocessing is harmless, because ingesting a PDF replaces its chunks.
+
+## Settings
+
+All settings are environment variables, read from `.env`. Only `OPENAI_API_KEY` is required.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `OPENAI_API_KEY` | none | Your OpenAI key |
+| `OPENAI_MODEL` | `gpt-6-luna` | Model that answers questions and rewrites follow-ups |
+| `OPENAI_REASONING_EFFORT` | `low` | `none`, `low`, `medium`, `high`, `xhigh` or `max`. Reasoning tokens are billed as output |
+| `RAG_DEFAULT_TENANT` | first company | UUID of the company the app opens on |
+| `RAG_TENANTS_FILE` | `tenants.json` | The companies: a UUID and a display name each |
+| `RAG_REDIS_URL` | `redis://localhost:6379/0` | The queue (Celery broker) |
+| `RAG_REDIS_RESULTS_URL` | database 1 of the same server | Job results |
+| `RAG_JOB_ATTEMPTS` | `3` | Attempts per job, the first run included |
+| `RAG_VISIBILITY_SECONDS` | `3600` | A job not acknowledged in this time is handed out again |
+| `RAG_MAX_PDF_MB` | `50` | Largest PDF the worker downloads |
+| `RAG_FETCH_ALLOW` | empty | Host names the worker may fetch from even if private (see below) |
+| `RAG_TRACING` | `1` | `0` turns Phoenix tracing off |
+| `PHOENIX_ENDPOINT` | `http://localhost:6006/v1/traces` | Where traces are sent |
+| `RAG_PDF_DIR` | `data/pdfs` | The PDFs, one folder per company |
+| `RAG_DB_DIR` | `data/lancedb` | The vector database |
+| `RAG_JOBS_DB` | `data/jobs.sqlite` | The job list |
+| `RAG_HISTORY_DB` | `data/history.sqlite` | The saved conversations |
+| `RAG_VECTOR_STORE` | `lancedb` | Which vector store backend to use |
 
 ## To do
 
