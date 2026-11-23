@@ -1,6 +1,8 @@
 """Run with: uv run streamlit run src/rag/app.py
 
 Embedded in a frontend, pass the company as ?tenant=<uuid>. Without it, a sidebar dropdown lists the tenants."""
+import re
+import uuid
 from pathlib import Path
 
 import streamlit as st
@@ -10,6 +12,7 @@ load_dotenv()
 
 from rag.ask import ask  # noqa: E402
 from rag.highlight import render_page  # noqa: E402
+from rag.history import add as save_turn, clear as clear_history, load as load_history  # noqa: E402
 from rag.jobs import ACTIVE, FINISHED, cancel_job, delete_job, jobs_for  # noqa: E402
 from rag.store import default_tenant, ingested_docs, labels, tenant_id, tenants  # noqa: E402
 from rag.tracing import setup  # noqa: E402
@@ -36,7 +39,22 @@ def pick_tenant() -> str:
         return st.selectbox("Company", known, index=first, format_func=lambda t: names.get(t, t))  # shows the label, returns the UUID
 
 
+SESSION = re.compile(r"[A-Za-z0-9_-]{8,64}")  # a frontend may pass its own id, for example a user id
+
+
+def session_id() -> str:
+    """One client, one conversation. The id lives in the URL, so a reload or a bookmark opens the same history."""
+    sid = st.query_params.get("session")
+    if not sid:
+        sid = st.query_params["session"] = uuid.uuid4().hex
+    elif not SESSION.fullmatch(sid):
+        st.error("Invalid session: expected 8 to 64 letters, digits, - or _ in ?session=")
+        st.stop()
+    return sid
+
+
 tenant = pick_tenant()
+session = session_id()
 
 with st.sidebar:
     st.header("Documents")
@@ -86,7 +104,16 @@ def show_answer(m: dict) -> None:
                 st.image(render_page(s["path"], s["page"], s["items"]))
 
 
-history = st.session_state.setdefault(f"history:{tenant}", [])
+key = f"history:{tenant}:{session}"
+if key not in st.session_state:  # a new session, a reload or a restart: start from what was saved
+    st.session_state[key] = load_history(tenant, session)
+history = st.session_state[key]
+if history:
+    with st.sidebar:
+        if st.button("Clear history", icon=":material/close:", type="tertiary"):
+            clear_history(tenant, session)
+            history.clear()
+            st.rerun()
 for m in history:
     with st.chat_message("user"):
         st.write(m["question"])
@@ -96,8 +123,9 @@ if question := st.chat_input("Ask about your documents", disabled=not docs):
     with st.chat_message("user"):
         st.write(question)
     with st.chat_message("assistant"), st.spinner("Searching and answering"):
-        m = {"question": question, **ask(question, tenant)}
+        m = {"question": question, **ask(question, tenant, history=history)}
         show_answer(m)
     history.append(m)
+    save_turn(tenant, session, m)
 if not docs:
     st.info("No documents yet. They arrive through the queue: queue a PDF URL with scripts/produce.py.")

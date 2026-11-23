@@ -10,7 +10,7 @@ def main() -> None:
 
     p = argparse.ArgumentParser(prog="rag")
     sub = p.add_subparsers(dest="cmd", required=True)
-    i = sub.add_parser("ingest")
+    i = sub.add_parser("ingest", help="ingest PDF files and keep a copy in the tenant's PDF folder, as a queued job does")
     i.add_argument("--tenant", required=True, type=tenant_id, help="company UUID")
     i.add_argument("pdfs", nargs="+", type=Path)
     r = sub.add_parser("reindex", help="rebuild a tenant's keyword indexes; stop the worker first")
@@ -23,10 +23,26 @@ def main() -> None:
     args = p.parse_args()
 
     if args.cmd == "ingest":
+        import os
+        import shutil
+        import uuid
+
         from rag.ingest import ingest
+        from rag.store import pdf_dir
 
         for pdf in args.pdfs:
-            print(f"{pdf.name}: {ingest(pdf, args.tenant)} chunks")
+            # Same as a queued job: the app reads the page from the tenant's folder, so the PDF must live there.
+            # It is copied to a hidden file first and takes its real name only after ingestion worked.
+            target = pdf_dir(args.tenant) / pdf.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            staging = target.with_name(f".staging-{uuid.uuid4().hex}.pdf")
+            try:
+                shutil.copyfile(pdf, staging)
+                chunks = ingest(staging, args.tenant, target)
+                os.replace(staging, target)
+            finally:
+                staging.unlink(missing_ok=True)
+            print(f"{pdf.name}: {chunks} chunks")
     elif args.cmd == "reindex":
         from rag.store import reindex
 

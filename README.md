@@ -45,14 +45,16 @@ The first start builds the image (about 5 GB of disk) and the first PDF download
 **Add a PDF.** Documents arrive through the queue, from a URL. In a second terminal, give the app a public `https` link to a PDF:
 
 ```
-docker compose exec app python scripts/produce.py --tenant "$RAG_DEFAULT_TENANT" https://example.com/yourfile.pdf
+docker compose exec app sh -c 'python scripts/produce.py --tenant "$RAG_DEFAULT_TENANT" https://example.com/yourfile.pdf'
 ```
 
 The job shows up in the sidebar, and the worker downloads and ingests it. To use a server on your own network, see `RAG_FETCH_ALLOW` below.
 
 It takes about a minute per 30 pages. Reload the app and ask a question about it.
 
-**Stop and clean up.** `Ctrl+C` stops everything, and your documents are kept. `docker compose down -v` also deletes the documents, the queue and the downloaded models.
+The conversation is saved in `data/history.sqlite`, so it comes back after a reload or a restart, and a follow-up question can refer to the earlier ones. Each client has its own history: the app puts a random `session` id in the page URL (`?session=...`), and the history is kept for that company and that id. Keep the URL, or bookmark it, to continue later. A frontend that embeds the app can pass its own id, for example `?tenant=<uuid>&session=<user id>`, to give every user a stable history. The id is not a password: anyone who has the full URL sees that history. `RAG_HISTORY_DB` changes the file. **Clear history** in the sidebar deletes it.
+
+**Stop and clean up.** `Ctrl+C` stops everything, and your documents are kept. `docker compose down -v` also deletes the documents, the chat history, the queue and the downloaded models.
 
 Below you will find how to run it without Docker, how search works, how much RAM it needs, and how the ingestion queue behaves.
 
@@ -118,7 +120,7 @@ If you do not run Phoenix, put `RAG_TRACING=0` in `.env`.
 
 **8. Add a document.** There are two ways.
 
-- **Directly, from a file on your machine.** It does not need Redis or the worker, and it blocks until the PDF is parsed:
+- **Directly, from a file on your machine.** It does not need Redis or the worker, and it blocks until the PDF is parsed. A copy goes to `data/pdfs`, as for a queued job, because the app reads the cited page from there:
 
   ```
   uv run rag ingest --tenant <uuid> path/to/file.pdf
@@ -151,6 +153,7 @@ A question is answered from the 8 best chunks of the tenant's documents. They co
 - **Why two keyword columns.** Each chunk's language is detected when it is ingested (Italian or English, with the `lingua` library, offline), and the language most chunks of a PDF were detected in is given to all of its chunks, because a document is normally written in one language. Each chunk goes into the column of its document's language, and each column has an index that stems words for that language, so *rifiuto* finds *rifiuti* and *device* finds *devices*. A PDF where the detector is unsure about every chunk goes into both columns. A quoted phrase in a question, such as `"copia privata"`, is matched as an exact phrase.
 - **Weights.** Each keyword ranking counts for half of the vector ranking, so together they weigh the same. Each ranking is 8 results deep. On ten test questions over your Italian documents, deeper rankings or full-weight keywords made the results worse. That is a small sample, so the settings are only reasonable defaults.
 - **Known limit.** A PDF that really mixes both languages is searched only with the rules of its main language.
+- **Follow-up questions.** When the conversation already has earlier questions, one extra OpenAI call first rewrites the new question so that it makes sense on its own ("and who are the parties?" becomes "who are the parties in case C-702/17?"), and the search uses that version. The answer call also sees the last 4 questions and answers, without their old citation numbers, which only made sense for the excerpts of that turn. The first question of a conversation makes no extra call.
 
 Tables made before the language columns existed are upgraded by `uv run rag reindex --tenant <uuid>`. It recomputes every chunk's language and rebuilds both indexes, and it is safe to run again. Stop the worker first, because LanceDB allows one writer. Adding a document to an old table upgrades it too, but searching one fails with a message that asks for the reindex.
 

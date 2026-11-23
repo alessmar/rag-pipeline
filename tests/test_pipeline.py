@@ -35,6 +35,7 @@ def tmp_db(tmp_path, monkeypatch):
     monkeypatch.setattr("rag.lancedb_store.DB_DIR", str(tmp_path / "db"))
     monkeypatch.setattr("rag.store.PDF_DIR", str(tmp_path / "pdfs"))
     monkeypatch.setattr("rag.jobs.JOBS_DB", str(tmp_path / "jobs.sqlite"))
+    monkeypatch.setattr("rag.history.HISTORY_DB", str(tmp_path / "history.sqlite"))
 
 
 def test_search_returns_paragraph_with_page_and_ref(pdf):
@@ -94,7 +95,7 @@ def test_streamlit_chat_shows_answer_and_source(pdf, monkeypatch):
                      "items": json.loads(hit[0]["items"]), "quotes": [{"text": "36 months", "verified": True}]}],
         "chunks": hit, "seconds": 0.1, "trace_id": "abc",
     }
-    monkeypatch.setattr(ask_mod, "ask", lambda q, t, k=8: fake)
+    monkeypatch.setattr(ask_mod, "ask", lambda q, t, k=8, history=None: fake)
     at = AppTest.from_file("../src/rag/app.py", default_timeout=60)
     at.query_params["tenant"] = T1  # how the frontends will embed the app
     at.run()
@@ -889,3 +890,126 @@ def test_fetch_allow_list_trusts_only_the_listed_host(site, tmp_path, pdf, monke
     assert (tmp_path / "b" / "a.pdf").read_bytes() == pdf.read_bytes()
     with pytest.raises(fetch.Refused):  # another name for the same machine is not listed
         fetch.fetch_pdf(site.replace("127.0.0.1", "localhost") + "/Q1%20report.pdf", tmp_path / "c" / "a.pdf")
+
+
+def test_a_follow_up_is_rewritten_before_the_search_and_the_model_sees_the_earlier_turns(pdf, monkeypatch):
+    ingest(pdf, T1)
+    calls = {"create": [], "parse": []}
+
+    def create(**kw):
+        calls["create"].append(kw)
+        return SimpleNamespace(output_text="warranty period of the X200 pump")
+
+    def parse(**kw):
+        calls["parse"].append(kw)
+        return SimpleNamespace(output_parsed=ask_mod.Answer(question_language="English", answer="36 months", citations=[]))
+
+    monkeypatch.setattr(ask_mod, "OpenAI", lambda: SimpleNamespace(responses=SimpleNamespace(create=create, parse=parse)))
+    seen = []
+    real_search = ask_mod.search
+    monkeypatch.setattr(ask_mod, "search", lambda q, t, k=8: seen.append(q) or real_search(q, t, k))
+
+    ask_mod.ask("warranty X200", T1, k=1)  # the first question: no rewrite, no extra call
+    assert not calls["create"] and seen == ["warranty X200"]
+
+    history = [{"question": "What is the X200?", "answer": "A pump [1]."}]
+    r = ask_mod.ask("and how long is the warranty?", T1, k=1, history=history)
+    assert len(calls["create"]) == 1 and "What is the X200?" in calls["create"][0]["input"][1]["content"]
+    assert seen[-1] == r["query"] == "warranty period of the X200 pump"  # the search used the rewritten question
+    sent = calls["parse"][-1]["input"]
+    assert sent[1:3] == [{"role": "user", "content": "What is the X200?"}, {"role": "assistant", "content": "A pump ."}]
+    assert sent[-1]["content"].endswith("Question: and how long is the warranty?")  # the user's own words are kept
+
+
+def test_history_is_kept_per_company_and_session_in_order_and_without_the_retrieved_text():
+    from rag import history
+
+    S1, S2 = "session-one", "session-two"
+    for i in range(history.SHOWN + 3):
+        history.add(T1, S1, {"question": f"q{i}", "answer": "a", "sources": [], "chunks": [{"text": "big"}]})
+    history.add(T1, S2, {"question": "same company, other client", "answer": "a", "sources": []})
+    history.add(T2, S1, {"question": "other company, same session id", "answer": "a", "sources": []})
+    got = history.load(T1, S1)
+    assert [t["question"] for t in got] == [f"q{i}" for i in range(3, history.SHOWN + 3)]  # the last ones, oldest first
+    assert all("chunks" not in t for t in got)
+    assert [t["question"] for t in history.load(T1, S2)] == ["same company, other client"]  # a client never sees another's
+    assert [t["question"] for t in history.load(T2, S1)] == ["other company, same session id"]
+    history.clear(T1, S1)
+    assert history.load(T1, S1) == [] and len(history.load(T1, S2)) == 1 and len(history.load(T2, S1)) == 1
+
+
+def test_a_history_table_from_before_sessions_existed_is_upgraded(tmp_path, monkeypatch):
+    import sqlite3
+
+    from rag import history
+
+    db = tmp_path / "old.sqlite"
+    with sqlite3.connect(db) as c:
+        c.execute("create table turns (id integer primary key autoincrement, tenant text, created text, turn text)")
+        c.execute("insert into turns (tenant, created, turn) values (?, 'x', '{\"question\": \"old\"}')", (T1,))
+    monkeypatch.setattr(history, "HISTORY_DB", str(db))
+    assert history.load(T1, "any-session") == []  # the old turns belong to no session, so nobody sees them
+    history.add(T1, "any-session", {"question": "new", "answer": "a"})
+    assert [t["question"] for t in history.load(T1, "any-session")] == ["new"]
+
+
+def _chat_app(session=None):
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file("../src/rag/app.py", default_timeout=60)
+    at.query_params["tenant"] = T1
+    if session:
+        at.query_params["session"] = session
+    return at.run()
+
+
+def test_the_chat_survives_a_reload_and_can_be_cleared(pdf, monkeypatch):
+    ingest(pdf, T1)
+    monkeypatch.setenv("RAG_TRACING", "0")
+    fake = {"answer": "36 months", "sources": [], "chunks": [], "seconds": 0.1, "trace_id": "abc"}
+    monkeypatch.setattr(ask_mod, "ask", lambda q, t, k=8, history=None: fake)
+
+    at = _chat_app("client-0001")
+    at.chat_input[0].set_value("warranty?").run()
+    assert "36 months" in [m.value for m in at.markdown]
+    again = _chat_app("client-0001")  # a brand new browser session with the same URL, as after a reload
+    assert not again.exception and "36 months" in [m.value for m in again.markdown]
+    assert "36 months" not in [m.value for m in _chat_app("client-0002").markdown]  # another client sees nothing
+    clear = [b for b in again.sidebar.button if b.label == "Clear history"][0]
+    clear.click().run()
+    assert "36 months" not in [m.value for m in again.markdown]
+    assert "36 months" not in [m.value for m in _chat_app("client-0001").markdown]  # and it stays cleared
+
+
+def test_a_visitor_without_a_session_gets_one_and_a_bad_one_is_refused(pdf, monkeypatch):
+    ingest(pdf, T1)
+    monkeypatch.setenv("RAG_TRACING", "0")
+    first, second = _chat_app(), _chat_app()
+    assert first.query_params["session"] != second.query_params["session"]  # each new visitor gets their own
+    bad = _chat_app("no way!")
+    assert bad.error and "Invalid session" in bad.error[0].value
+
+
+def test_cli_ingest_keeps_a_copy_in_the_tenant_folder_like_a_queued_job(pdf, monkeypatch, tmp_path):
+    import sys
+
+    from rag import cli
+    from rag.store import pdf_dir
+
+    outside = tmp_path / "elsewhere" / "manual.pdf"  # a file the app cannot see, like /tmp in the worker container
+    outside.parent.mkdir()
+    outside.write_bytes(pdf.read_bytes())
+    monkeypatch.setattr(sys, "argv", ["rag", "ingest", "--tenant", T1, str(outside)])
+    cli.main()
+    kept = pdf_dir(T1) / "manual.pdf"
+    assert kept.read_bytes() == pdf.read_bytes() and outside.exists()  # a copy, the original stays
+    assert [p.name for p in pdf_dir(T1).iterdir()] == ["manual.pdf"]  # no staging file left
+    assert search("warranty X200", T1, k=1)[0]["path"] == str(kept.resolve())  # the app finds the page here
+    # a PDF that fails leaves nothing behind
+    monkeypatch.setattr("rag.ingest.chunk_pdf", lambda *a, **k: [])
+    other = outside.with_name("other.pdf")
+    other.write_bytes(pdf.read_bytes())
+    monkeypatch.setattr(sys, "argv", ["rag", "ingest", "--tenant", T1, str(other)])
+    with pytest.raises(Exception):
+        cli.main()
+    assert [p.name for p in pdf_dir(T1).iterdir()] == ["manual.pdf"]
