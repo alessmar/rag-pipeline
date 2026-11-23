@@ -1,5 +1,9 @@
 # RAG pipeline
 
+[![test](https://github.com/alessmar/rag-pipeline/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/alessmar/rag-pipeline/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/github/license/alessmar/rag-pipeline)](LICENSE)
+[![Python version](https://img.shields.io/python/required-version-toml?tomlFilePath=https%3A%2F%2Fraw.githubusercontent.com%2Falessmar%2Frag-pipeline%2Fmain%2Fpyproject.toml)](pyproject.toml)
+
 Question answering over PDF documents, with answers that cite the exact paragraph and page. PDFs are parsed with Docling, embedded locally, stored in LanceDB, and answered by an OpenAI model. Traces go to Phoenix.
 
 ![An answer with its sources, from a 12-page PDF](docs/answer.png)
