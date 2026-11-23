@@ -42,13 +42,13 @@ The first start builds the image (about 5 GB of disk) and the first PDF download
 - the chat app is at http://localhost:8501
 - Phoenix, which shows what each question retrieved and sent to OpenAI, is at http://localhost:6006
 
-**Add a PDF.** Documents arrive through the queue, from a URL. In a second terminal, give the app a public `https` link to a PDF:
+**Add a PDF.** Documents belong to a company (a tenant), and `RAG_DEFAULT_TENANT` in your `.env` is the default one: see "Configure tenants" below. Documents arrive through the queue, from a URL. In a second terminal, give the app a public `https` link to a PDF:
 
 ```
 docker compose exec app sh -c 'python scripts/produce.py --tenant "$RAG_DEFAULT_TENANT" https://example.com/yourfile.pdf'
 ```
 
-The job shows up in the sidebar, and the worker downloads and ingests it.
+The job list in the app's sidebar shows each job as queued, running, done or failed, and the PDF count updates when it finishes. Each line has an X icon: on a finished job it removes the job from the list, and on a job that has not started yet it cancels it (the worker then skips it). A job in progress has no X, because a running ingestion cannot be stopped safely.
 
 **A PDF on your disk.** The worker only downloads from the network, so serve the folder from your machine and let the worker reach it. From the project folder:
 
@@ -73,94 +73,38 @@ The conversation is saved in `data/history.sqlite`, so it comes back after a rel
 
 **Stop and clean up.** `Ctrl+C` stops everything, and your documents are kept. `docker compose down -v` also deletes the documents, the chat history, the queue and the downloaded models.
 
-Below you will find how to run it without Docker, how search works, how much RAM it needs, and how the ingestion queue behaves.
+Below you will find how to configure tenants, how search works, how much RAM it needs, and how the ingestion queue behaves.
 
-## Running it without Docker
+## Configure tenants
 
-You need Python 3.11 or newer, [uv](https://docs.astral.sh/uv/), Docker (for Redis), and an OpenAI API key. About 8 GB of RAM is a sensible minimum, see the memory section below.
+A tenant is a company. Each one has its own documents, search and chat history, and they never mix. A tenant is a UUID with a display name, and the names are listed in `tenants.json`.
 
-**1. Install the dependencies**
-
-```
-uv sync
-```
-
-**2. Create `.env`** in the project folder, and keep it out of version control:
-
-```
-OPENAI_API_KEY=sk-...
-RAG_REDIS_URL=redis://localhost:6379/0
-```
-
-Every other setting is optional and has a default (model, reasoning effort, retries, size limits). The ones used by the ingestion queue are listed in the section further down.
-
-**3. Create `tenants.json`**, which lists the companies. Each company is a UUID with a display name. Skip this step if you already have the file, because this command would replace it:
-
-```
-python3 -c "import uuid, json; print(json.dumps({str(uuid.uuid4()): 'mycompany'}, indent=2))" > tenants.json
-cat tenants.json
-```
-
-Note the UUID: every command and URL below uses it.
-
-**4. Start Redis in Docker**, with a named volume so the queue survives restarts and removing the container:
-
-```
-docker volume create rag-redis-data
-docker run -d --name rag-redis -p 127.0.0.1:6379:6379 -v rag-redis-data:/data \
-  redis:7-alpine redis-server --appendonly yes --maxmemory-policy noeviction
-```
-
-`rag-redis-data` is a named volume: Docker manages it, and you can list it with `docker volume ls`. This publishes Redis on `localhost` only, writes its data to the volume (`--appendonly yes`), and stops it from ever discarding queued jobs to free memory (`--maxmemory-policy noeviction`). Later, `docker stop rag-redis` and `docker start rag-redis` stop and start it again, and the queue is kept.
-
-**5. Start the worker** in its own terminal. It takes the queued jobs one at a time. The first run downloads the Docling and embedding models, which takes a few minutes.
-
-```
-uv run rag worker
-```
-
-**6. Start the chat app** in another terminal:
-
-```
-uv run streamlit run src/rag/app.py
-```
-
-Open `http://localhost:8501/?tenant=<your uuid>`. Without the `?tenant=` part the sidebar shows a dropdown of the companies in `tenants.json`, opened on the company set in `RAG_DEFAULT_TENANT` (a UUID in `.env`) or else the first one. You can also ask from the command line: `uv run rag ask --tenant <uuid> "your question"`.
-
-**7. Optional: traces.** Phoenix shows what each question retrieved and sent to OpenAI. Run it in a third terminal, and open `http://localhost:6006`:
-
-```
-PHOENIX_WORKING_DIR=$PWD/data/phoenix uv run phoenix serve
-```
-
-If you do not run Phoenix, put `RAG_TRACING=0` in `.env`.
-
-**8. Add a document.** There are two ways.
-
-- **Directly, from a file on your machine.** It does not need Redis or the worker, and it blocks until the PDF is parsed. A copy goes to `data/pdfs`, as for a queued job, because the app reads the cited page from there:
+- **`RAG_DEFAULT_TENANT`** is the UUID of the company the app opens on, and the one the ingestion commands above use. It can be any UUID. `.env.example` has one you can keep, or make your own: `python3 -c "import uuid; print(uuid.uuid4())"`.
+- **Docker creates `tenants.json` for you.** On the first start it writes one company, your `RAG_DEFAULT_TENANT`, named "default". The file lives in the data volume at `/app/data/tenants.json`, so it is kept across restarts and never overwritten.
+- **To add a company**, put a new UUID and a name in that file:
 
   ```
-  uv run rag ingest --tenant <uuid> path/to/file.pdf
+  docker compose exec app python -c "
+  import json, uuid
+  f = '/app/data/tenants.json'
+  d = json.load(open(f)); d[str(uuid.uuid4())] = 'acme'
+  json.dump(d, open(f, 'w'), indent=2); print(json.dumps(d, indent=2))"
   ```
 
-- **Through the queue, from a URL**, the same way a real producer would:
+  It prints the file, with the new UUID. Reload the page and the company appears in the sidebar dropdown, with no restart.
+- **To rename a company**, change its name in the file. This renames the default company to "acme":
 
   ```
-  uv run python scripts/produce.py --tenant <uuid> https://example.com/file.pdf
+  docker compose exec app python -c "
+  import json, os
+  f = '/app/data/tenants.json'
+  d = json.load(open(f)); d[os.environ['RAG_DEFAULT_TENANT']] = 'acme'
+  json.dump(d, open(f, 'w'), indent=2); print(json.dumps(d, indent=2))"
   ```
 
-  The worker only downloads public `https` URLs. To try the queue with a PDF from your own machine, serve its folder over HTTP and list `127.0.0.1` in `RAG_FETCH_ALLOW` (see below). Add `RAG_FETCH_ALLOW=127.0.0.1` to `.env`, restart the worker, then:
-
-  ```
-  python3 -m http.server 8000 --bind 127.0.0.1 --directory path/to/pdfs
-  uv run python scripts/produce.py --tenant <uuid> http://127.0.0.1:8000/file.pdf
-  ```
-
-The job list in the app's sidebar shows each job as queued, running, done or failed, and the PDF count updates when it finishes. Each line has an X icon: on a finished job it removes the job from the list, and on a job that has not started yet it cancels it (the worker then skips it). A job in progress has no X, because a running ingestion cannot be stopped safely.
-
-**Tests.** `uv run pytest` runs the suite. It needs neither Redis nor an OpenAI key, because it runs queued jobs in the calling process and replaces the OpenAI call.
-
-**Stopping and cleaning up.** Stop the three processes with `Ctrl+C`. `docker stop rag-redis` stops Redis. To delete the queue completely, run `docker rm -f rag-redis` and `docker volume rm rag-redis-data`. Your documents are not in Redis: they are in `data/` (the vector database in `data/lancedb`, the PDFs in `data/pdfs`).
+  Documents and chat history belong to the UUID, not to the name, so nothing is lost. Reload the page to see the new name.
+- **To ingest into the new company**, give its UUID to `--tenant` in place of `"$RAG_DEFAULT_TENANT"`.
+- **To embed the app for one company**, open `?tenant=<uuid>`. The other companies are then not listed.
 
 ## How search works
 
@@ -172,7 +116,15 @@ A question is answered from the 8 best chunks of the tenant's documents. They co
 - **Known limit.** A PDF that really mixes both languages is searched only with the rules of its main language.
 - **Follow-up questions.** When the conversation already has earlier questions, one extra OpenAI call first rewrites the new question so that it makes sense on its own ("and who are the parties?" becomes "who are the parties in case C-702/17?"), and the search uses that version. The answer call also sees the last 4 questions and answers, without their old citation numbers, which only made sense for the excerpts of that turn. The first question of a conversation makes no extra call.
 
-Tables made before the language columns existed are upgraded by `uv run rag reindex --tenant <uuid>`. It recomputes every chunk's language and rebuilds both indexes, and it is safe to run again. Stop the worker first, because LanceDB allows one writer. Adding a document to an old table upgrades it too, but searching one fails with a message that asks for the reindex.
+Tables made before the language columns existed are upgraded by `rag reindex`. Stop the worker first, because LanceDB allows one writer, and start it again afterwards:
+
+```
+docker compose stop worker
+docker compose exec app sh -c 'rag reindex --tenant "$RAG_DEFAULT_TENANT"'
+docker compose start worker
+```
+
+It recomputes every chunk's language and rebuilds both indexes, and it is safe to run again. Adding a document to an old table upgrades it too, but searching one fails with a message that asks for the reindex.
 
 ## Memory requirements
 
@@ -206,14 +158,14 @@ Disk space, measured:
 
 A PDF is submitted as a small message and the call returns at once. A separate worker process downloads it, then does the parsing and embedding. The sidebar of the app lists each job as queued, running, retrying, done, failed or cancelled.
 
-The queue is Celery with Redis as the broker and the result backend (`RAG_REDIS_URL` in `.env`). Start Redis, then the worker next to the app: `uv run rag worker`. The worker takes one job at a time, in a single process. LanceDB allows a single writer, and ingesting a PDF peaks at about 4 GB of RAM, so do not run more than one worker.
+The queue is Celery with Redis as the broker and the result backend (`RAG_REDIS_URL` in `.env`). Docker Compose starts Redis, the app and the worker (`rag worker`) together. The worker takes one job at a time, in a single process. LanceDB allows a single writer, and ingesting a PDF peaks at about 4 GB of RAM, so do not run more than one worker.
 
 ### Submitting
 
 `scripts/produce.py` is a throwaway producer that puts URLs on the queue:
 
 ```
-uv run python scripts/produce.py --tenant <company uuid> https://files.example.com/contract.pdf
+docker compose exec app python scripts/produce.py --tenant <company uuid> https://files.example.com/contract.pdf
 ```
 
 The message is the task `rag.ingest` with two JSON arguments, `tenant` and `url`. The PDF never travels in the message: the worker downloads it, ingests it, and keeps it in the tenant's folder (the app needs it to show the cited page). The PDF is kept only if ingestion worked. A job that fails leaves no file behind, and a failed job never overwrites the PDF of a document that was ingested earlier. Submitting a URL with the same file name again replaces that document once the new version has been ingested. Jobs queued while the worker is stopped wait in Redis and run when it starts.
@@ -263,6 +215,10 @@ All settings are environment variables, read from `.env`. Only `OPENAI_API_KEY` 
 | `RAG_JOBS_DB` | `data/jobs.sqlite` | The job list |
 | `RAG_HISTORY_DB` | `data/history.sqlite` | The saved conversations |
 | `RAG_VECTOR_STORE` | `lancedb` | Which vector store backend to use |
+
+## Tests
+
+Install the dependencies with `uv sync`, then `uv run pytest` runs the suite. It needs neither Redis nor an OpenAI key, because it runs queued jobs in the calling process and replaces the OpenAI call.
 
 ## To do
 
