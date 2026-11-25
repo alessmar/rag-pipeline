@@ -18,7 +18,7 @@ I built it with the help of Claude Code, but I directed the architecture and cho
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="diagrams/rag-stack-dark.png">
-  <img alt="Stack diagram: the Streamlit app and the Celery worker each embed with a local model; the worker parses PDFs with Docling into LanceDB, Redis carries the queue, SQLite keeps jobs and chat history, OpenAI rewrites follow-ups and answers, Phoenix collects traces" src="diagrams/rag-stack.png">
+  <img alt="Stack diagram: the Streamlit app and the Celery worker each embed with a local model; the worker parses PDFs with Docling into LanceDB, an API-key protected HTTP API validates jobs and puts them on the Redis queue, SQLite keeps jobs and chat history, OpenAI rewrites follow-ups and answers, Phoenix collects traces" src="diagrams/rag-stack.png">
 </picture>
 
 ## Quick start (Docker)
@@ -156,21 +156,31 @@ Disk space, measured:
 
 ## Ingestion queue
 
-A PDF is submitted as a small message and the call returns at once. A separate worker process downloads it, then does the parsing and embedding. The sidebar of the app lists each job as queued, running, retrying, done, failed or cancelled.
+A PDF is submitted as a small job and the call returns at once. A separate worker process downloads it, then does the parsing and embedding. The sidebar of the app lists each job as queued, running, retrying, done, failed or cancelled.
 
 The queue is Celery with Redis as the broker and the result backend (`RAG_REDIS_URL` in `.env`). Docker Compose starts Redis, the app and the worker (`rag worker`) together. The worker takes one job at a time, in a single process. LanceDB allows a single writer, and ingesting a PDF peaks at about 4 GB of RAM, so do not run more than one worker.
 
 ### Submitting
 
-`scripts/produce.py` is a throwaway producer that puts URLs on the queue:
+Redis is not published: only the containers of the stack can reach it. Everything else submits a job through the HTTP API, which validates the payload and puts it on the queue. Set `RAG_API_KEY` in `.env` (at least 16 characters; the API refuses to start without it), and the API listens on `127.0.0.1:8010`:
+
+```
+curl -X POST http://localhost:8010/jobs \
+  -H "x-api-key: $RAG_API_KEY" -H "content-type: application/json" \
+  -d '{"tenant": "<company uuid>", "url": "https://files.example.com/contract.pdf"}'
+```
+
+It answers `202` with `{"job_id": "..."}`. `401` means the key is missing or wrong, `422` means the payload is not valid (the tenant is not a UUID or not a configured company, the URL is not `http(s)` or is longer than 2048 characters, it has credentials, or the body has an extra field), and `503` means the queue is down. The key travels in a header, so put TLS in front of the API (a reverse proxy such as Caddy) before you publish it beyond `localhost`.
+
+`scripts/produce.py` does the same from inside the stack, without the API:
 
 ```
 docker compose exec app python scripts/produce.py --tenant <company uuid> https://files.example.com/contract.pdf
 ```
 
-The message is the task `rag.ingest` with two JSON arguments, `tenant` and `url`. The PDF never travels in the message: the worker downloads it, ingests it, and keeps it in the tenant's folder (the app needs it to show the cited page). The PDF is kept only if ingestion worked. A job that fails leaves no file behind, and a failed job never overwrites the PDF of a document that was ingested earlier. Submitting a URL with the same file name again replaces that document once the new version has been ingested. Jobs queued while the worker is stopped wait in Redis and run when it starts.
+The PDF never travels with the job, which holds only the tenant and the URL: the worker downloads it, ingests it, and keeps it in the tenant's folder (the app needs it to show the cited page). The PDF is kept only if ingestion worked. A job that fails leaves no file behind, and a failed job never overwrites the PDF of a document that was ingested earlier. Submitting a URL with the same file name again replaces that document once the new version has been ingested. Jobs queued while the worker is stopped wait in Redis and run when it starts.
 
-Job states are kept in a small SQLite file (`data/jobs.sqlite`), because Celery's result backend cannot list jobs by tenant. A producer on another machine creates no row, so such a job appears in the sidebar once the worker starts it.
+Job states are kept in a small SQLite file (`data/jobs.sqlite`), because Celery's result backend cannot list jobs by tenant. A job that did not come through the app or the API creates no row, so it appears in the sidebar once the worker starts it.
 
 ### What the worker accepts
 
@@ -181,13 +191,12 @@ The URL comes from a producer, so the worker treats it as hostile (this is what 
 - The file must start with `%PDF-` and stay below `RAG_MAX_PDF_MB` (50 by default). The download has a time limit.
 - Exception: to fetch from a server on your own network (a MinIO, a NAS), list its host name in `RAG_FETCH_ALLOW`, comma separated, for example `RAG_FETCH_ALLOW=minio.internal,files.lan`. Only those exact host names skip the public-address check, and they may also use `http` and any port. A redirect to any other host is still checked as usual.
 
-A job that can never succeed (a blocked address, a 4xx answer, not a PDF, no extractable text, a malformed message) is marked failed at once and not retried. A temporary problem (timeout, 5xx, connection error) and any other error is retried with a growing delay, up to `RAG_JOB_ATTEMPTS` attempts in total. A job that fails permanently still shows as a successful Celery task, because the worker handled it: the real outcome is in the job status.
+A job that can never succeed (a blocked address, a 4xx answer, not a PDF, no extractable text, a malformed job) is marked failed at once and not retried. A temporary problem (timeout, 5xx, connection error) and any other error is retried with a growing delay, up to `RAG_JOB_ATTEMPTS` attempts in total. A job that fails permanently still shows as a successful Celery task, because the worker handled it: the real outcome is in the job status.
 
 ### Running Redis safely
 
-- Messages use JSON only, never pickle, so a message cannot run code in the worker.
 - The queue is database 0 and the job results are database 1 of the same server (`RAG_REDIS_RESULTS_URL` changes that). Databases separate the data, so clearing one leaves the other, but they are not a security boundary: a password and the `noeviction` setting apply to the whole server. Redis Cluster has only database 0, so set `RAG_REDIS_RESULTS_URL` there.
-- Redis is the trust boundary. Anyone who can write to it can queue a job for any tenant, because the tenant is part of the message. Keep Redis on a private network or `127.0.0.1`, set a password, and give a producer an ACL user that may only add to the queue.
+- Redis is the trust boundary. Anyone who can write to it can queue a job for any tenant. Compose does not publish it, so only the stack's containers reach it, and the HTTP API (with its `x-api-key`) is the way in for everyone else. If you publish Redis anyway, set a password and give producers an ACL user that may only add to the queue.
 - Turn on persistence (`appendonly yes`), or a Redis restart empties the queue. Set `maxmemory-policy noeviction` so Redis never drops queued jobs to free memory.
 - A job that is not acknowledged within `RAG_VISIBILITY_SECONDS` (one hour by default) is handed out again, so keep it above your slowest PDF. Reprocessing is harmless, because ingesting a PDF replaces its chunks.
 
@@ -202,6 +211,7 @@ All settings are environment variables, read from `.env`. Only `OPENAI_API_KEY` 
 | `OPENAI_REASONING_EFFORT` | `low` | `none`, `low`, `medium`, `high`, `xhigh` or `max`. Reasoning tokens are billed as output |
 | `RAG_DEFAULT_TENANT` | first company | UUID of the company the app opens on |
 | `RAG_TENANTS_FILE` | `tenants.json` | The companies: a UUID and a display name each |
+| `RAG_API_KEY` | none, required for the API | The `x-api-key` value the HTTP API asks for, at least 16 characters |
 | `RAG_REDIS_URL` | `redis://localhost:6379/0` | The queue (Celery broker) |
 | `RAG_REDIS_RESULTS_URL` | database 1 of the same server | Job results |
 | `RAG_JOB_ATTEMPTS` | `3` | Attempts per job, the first run included |

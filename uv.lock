@@ -4280,6 +4280,7 @@ dependencies = [
     { name = "arize-phoenix-otel" },
     { name = "celery", extra = ["redis"] },
     { name = "docling" },
+    { name = "fastapi" },
     { name = "httpcore" },
     { name = "lancedb" },
     { name = "lingua-language-detector", version = "2.1.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -4297,6 +4298,7 @@ dependencies = [
     { name = "torch", version = "2.15.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'linux'" },
     { name = "torchvision", version = "0.29.2", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
     { name = "torchvision", version = "0.29.2+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'linux'" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -4311,6 +4313,7 @@ requires-dist = [
     { name = "arize-phoenix-otel", specifier = ">=0.17.3" },
     { name = "celery", extras = ["redis"], specifier = ">=5.7.0" },
     { name = "docling", specifier = ">=2.150.1" },
+    { name = "fastapi", specifier = ">=0.163.2" },
     { name = "httpcore", specifier = ">=1.0.9" },
     { name = "lancedb", specifier = ">=0.41.0" },
     { name = "lingua-language-detector", specifier = ">=2.1.1" },
@@ -4327,6 +4330,7 @@ requires-dist = [
     { name = "torch", marker = "sys_platform == 'linux'", specifier = ">=2.15.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torchvision", marker = "sys_platform != 'linux'" },
     { name = "torchvision", marker = "sys_platform == 'linux'", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "uvicorn", specifier = ">=0.54.0" },
 ]
 
 [package.metadata.requires-dev]

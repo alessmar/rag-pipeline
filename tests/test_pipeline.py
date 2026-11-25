@@ -1013,3 +1013,59 @@ def test_cli_ingest_keeps_a_copy_in_the_tenant_folder_like_a_queued_job(pdf, mon
     with pytest.raises(Exception):
         cli.main()
     assert [p.name for p in pdf_dir(T1).iterdir()] == ["manual.pdf"]
+
+
+@pytest.fixture
+def api(monkeypatch, tmp_db):
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("RAG_API_KEY", "k" * 24)
+    import rag.api
+
+    mod = importlib.reload(rag.api)
+    queued = []
+    monkeypatch.setattr(mod, "tenants", lambda: [T1])
+    monkeypatch.setattr(mod, "submit_url", lambda t, u: queued.append((t, u)) or "job1")
+    return TestClient(mod.app), queued
+
+
+GOOD = {"tenant": T1, "url": "https://files.example.com/a.pdf"}
+KEY = {"x-api-key": "k" * 24}
+
+
+def test_api_queues_a_valid_payload(api):
+    client, queued = api
+    r = client.post("/jobs", json=GOOD, headers=KEY)
+    assert r.status_code == 202 and r.json() == {"job_id": "job1"} and queued == [(T1, GOOD["url"])]
+
+
+@pytest.mark.parametrize("headers", [{}, {"x-api-key": "wrong"}, {"x-api-key": ""}])
+def test_api_refuses_a_missing_or_wrong_key(api, headers):
+    client, queued = api
+    assert client.post("/jobs", json=GOOD, headers=headers).status_code == 401 and not queued
+
+
+@pytest.mark.parametrize("body", [
+    {**GOOD, "tenant": "not-a-uuid"},
+    {**GOOD, "url": "ftp://host/a.pdf"},
+    {**GOOD, "url": "https://user:pw@host/a.pdf"},
+    {**GOOD, "url": "https://host/" + "a" * 2100},
+    {**GOOD, "extra": 1},
+    {"tenant": T1},
+    {**GOOD, "tenant": T2},  # a valid UUID that is not a known company
+])
+def test_api_rejects_a_bad_payload(api, body):
+    client, queued = api
+    assert client.post("/jobs", json=body, headers=KEY).status_code == 422 and not queued
+
+
+def test_api_will_not_start_without_a_key(monkeypatch):
+    import importlib
+
+    import rag.api
+
+    monkeypatch.setenv("RAG_API_KEY", "short")
+    with pytest.raises(RuntimeError):
+        importlib.reload(rag.api)
